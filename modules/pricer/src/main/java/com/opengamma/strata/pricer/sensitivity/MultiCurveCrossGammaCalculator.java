@@ -5,11 +5,18 @@
  */
 package com.opengamma.strata.pricer.sensitivity;
 
+import static com.opengamma.strata.collect.Guavate.toImmutableList;
+
+import java.util.List;
 import java.util.Map.Entry;
-import java.util.Optional;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 
 import com.opengamma.strata.basics.currency.Currency;
+import com.opengamma.strata.basics.index.Index;
+import com.opengamma.strata.basics.index.PriceIndex;
+import com.opengamma.strata.basics.index.RateIndex;
+import com.opengamma.strata.collect.ArgChecker;
 import com.opengamma.strata.collect.array.DoubleArray;
 import com.opengamma.strata.collect.array.DoubleMatrix;
 import com.opengamma.strata.market.curve.Curve;
@@ -17,7 +24,7 @@ import com.opengamma.strata.market.curve.NodalCurve;
 import com.opengamma.strata.market.param.CrossGammaParameterSensitivities;
 import com.opengamma.strata.market.param.CrossGammaParameterSensitivity;
 import com.opengamma.strata.market.param.CurrencyParameterSensitivities;
-import com.opengamma.strata.market.param.CurrencyParameterSensitivity;
+import com.opengamma.strata.market.param.ParameterMetadata;
 import com.opengamma.strata.math.impl.differentiation.FiniteDifferenceType;
 import com.opengamma.strata.math.impl.differentiation.VectorFieldFirstOrderDifferentiator;
 import com.opengamma.strata.pricer.rate.ImmutableRatesProvider;
@@ -25,11 +32,7 @@ import com.opengamma.strata.pricer.rate.ImmutableRatesProvider;
 /**
  * Computes the cross-gamma to the curve parameters for multi-curve with all the curves in the same currency and instruments.
  * <p>
- * The curves should be represented by a YieldCurve with an InterpolatedDoublesCurve on the zero-coupon rates.
- * By default the gamma is computed using a one basis-point shift. This default can be change in a constructor.
- * The results themselves are not scaled (the represent the second order derivative).
- * <p>
- * <p> Reference: Interest Rate Cross-gamma for Single and Multiple Curves. OpenGamma Analysis 1, August 14
+ * Reference: Interest Rate Cross-gamma for Single and Multiple Curves. OpenGamma Analysis 1, August 14
  */
 public class MultiCurveCrossGammaCalculator {
 
@@ -37,7 +40,7 @@ public class MultiCurveCrossGammaCalculator {
    * Default implementation. Finite difference is forward and the shift is one basis point (0.0001).
    */
   public static final MultiCurveCrossGammaCalculator DEFAULT =
-      new MultiCurveCrossGammaCalculator(FiniteDifferenceType.FORWARD, 1.0E-4);
+      new MultiCurveCrossGammaCalculator(FiniteDifferenceType.CENTRAL, 1.0E-6);
 
   /**
    * The first order finite difference calculator.
@@ -87,61 +90,88 @@ public class MultiCurveCrossGammaCalculator {
   }
 
   //-------------------------------------------------------------------------
+  /**
+   * Computes intra-curve cross gamma by applying finite difference method to curve delta.
+   * <p>
+   * This computes the intra-curve cross gamma, i.e., the second order sensitivities to individual curves. 
+   * Thus the sensitivity of a curve delta to another curve is not produced.
+   * <p>
+   * The sensitivities are computed for discount curves, and forward curves for {@code RateIndex} and {@code PriceIndex}. 
+   * This implementation works only for single currency assets. 
+   * 
+   * @param ratesProvider  the rates provider
+   * @param sensitivitiesFn  the sensitivity function
+   * @return the cross gamma
+   */
   public CrossGammaParameterSensitivities calculateCrossGammaIntraCurve(
       ImmutableRatesProvider ratesProvider,
       Function<ImmutableRatesProvider, CurrencyParameterSensitivities> sensitivitiesFn) {
     
+    CurrencyParameterSensitivities baseDelta = sensitivitiesFn.apply(ratesProvider); // used to check target sensitivity exits
     CrossGammaParameterSensitivities result = CrossGammaParameterSensitivities.empty();
+    // discount curve
     for (Entry<Currency, Curve> entry : ratesProvider.getDiscountCurves().entrySet()) {
-      NodalCurve nodalCurve = (NodalCurve) entry.getValue(); // TODO 
-      DoubleArray parameters = nodalCurve.getYValues();
-      Function<DoubleArray, DoubleArray> function = new Function<DoubleArray, DoubleArray>() {
-        @Override
-        public DoubleArray apply(DoubleArray t) {
-          NodalCurve newCurve = nodalCurve.withYValues(t);
-          ImmutableRatesProvider newRates = ratesProvider.toBuilder().discountCurve(entry.getKey(), newCurve).build();
-          CurrencyParameterSensitivities sensiMulti = sensitivitiesFn.apply(newRates);
-          Optional<CurrencyParameterSensitivity> sensiSingle = sensiMulti.findSensitivity(newCurve.getName(), entry.getKey());
-          return sensiSingle.isPresent() ? sensiSingle.get().getSensitivity() : DoubleArray.of();
-        }
-      };
-      DoubleMatrix sensi = fd.differentiate(function).apply(parameters);
-      result = result.combinedWith(CrossGammaParameterSensitivity.of(nodalCurve.getName(),
-          nodalCurve.getMetadata().getParameterMetadata().get(), entry.getKey(), sensi));
+      Currency currency = entry.getKey();
+      Curve curve = entry.getValue();
+      if (baseDelta.findSensitivity(curve.getName(), currency).isPresent()) {
+        NodalCurve nodalCurve = getNodalCurve(curve);
+        CrossGammaParameterSensitivity gammaSingle = computeGammaForCurve(
+            nodalCurve, currency, c -> ratesProvider.toBuilder().discountCurve(currency, c).build(), sensitivitiesFn);
+        result = result.combinedWith(gammaSingle);
+      }
     }
-
+    // forward curve
+    for (Entry<Index, Curve> entry : ratesProvider.getIndexCurves().entrySet()) {
+      Index index = entry.getKey();
+      if (index instanceof RateIndex || index instanceof PriceIndex) {
+        Currency currency = getCurrency(index);
+        Curve curve = entry.getValue();
+        if (baseDelta.findSensitivity(curve.getName(), currency).isPresent()) {
+          NodalCurve nodalCurve = getNodalCurve(curve);
+          CrossGammaParameterSensitivity gammaSingle = computeGammaForCurve(
+              nodalCurve, currency, c -> ratesProvider.toBuilder().indexCurve(index, c).build(), sensitivitiesFn);
+          result = result.combinedWith(gammaSingle);
+        }
+      }
+    }
     return result;
   }
 
+  //-------------------------------------------------------------------------
+  private NodalCurve getNodalCurve(Curve curve) {
+    ArgChecker.isTrue(curve instanceof NodalCurve, "underlying curve must be NodalCurve");
+    return (NodalCurve) curve;
+  }
 
-//  private <T> CrossGammaParameterSensitivities sensitivity(ImmutableRatesProvider ratesProvider, Map<T, Curve> baseCurves,
-//      Function<Curve, ImmutableRatesProvider> ratesProviderFn,
-//      Currency sensitivityCurrency,
-//      Function<ImmutableRatesProvider, CurrencyParameterSensitivities> sensitivitiesFn) {
-//
-//    CrossGammaParameterSensitivities result = CrossGammaParameterSensitivities.empty();
-//    for (Entry<T, Curve> entry : baseCurves.entrySet()) {
-//      NodalCurve nodalCurve = (NodalCurve) entry.getValue(); // TODO 
-//      DoubleArray parameters = nodalCurve.getYValues();
-//      Function<DoubleArray, DoubleArray> function = new Function<DoubleArray, DoubleArray>() {
-//        @Override
-//        public DoubleArray apply(DoubleArray t) {
-//          NodalCurve newCurve = nodalCurve.withYValues(t);
-//          ImmutableRatesProvider newRates = ratesProviderFn.apply(newCurve);
-//          CurrencyParameterSensitivities sensi = sensitivitiesFn.apply(newRates);
-//          try {
-//            sensi.getSensitivities().
-//            return sensi.getSensitivity(nodalCurve.getName(), sensitivityCurrency).getSensitivity();
-//          } catch (Exception e) {
-//            return DoubleArray.of(); // TODO
-//          }
-//        }
-//      };
-//      DoubleMatrix sensi = fd.differentiate(function).apply(parameters);
-//      result = result.combinedWith(CrossGammaParameterSensitivity.of(nodalCurve.getName(),
-//          nodalCurve.getMetadata().getParameterMetadata().get(), sensitivityCurrency, sensi));
-//    }
-//
-//    return result;
-//  }
+  private Currency getCurrency(Index index){
+    if (index instanceof RateIndex){
+      return ((RateIndex) index).getCurrency();
+    } else if (index instanceof PriceIndex) {
+      return ((PriceIndex) index).getCurrency();
+    } 
+    throw new IllegalArgumentException("unsupported index");
+  }
+
+  CrossGammaParameterSensitivity computeGammaForCurve(
+      NodalCurve nodalCurve,
+      Currency sensitivityCurrency,
+      Function<Curve, ImmutableRatesProvider> ratesProviderFn,
+      Function<ImmutableRatesProvider, CurrencyParameterSensitivities> sensitivitiesFn) {
+
+    Function<DoubleArray, DoubleArray> function = new Function<DoubleArray, DoubleArray>() {
+      @Override
+      public DoubleArray apply(DoubleArray t) {
+        NodalCurve newCurve = nodalCurve.withYValues(t);
+        ImmutableRatesProvider newRates = ratesProviderFn.apply(newCurve);
+        CurrencyParameterSensitivities sensiMulti = sensitivitiesFn.apply(newRates);
+        return sensiMulti.getSensitivity(newCurve.getName(), sensitivityCurrency).getSensitivity();
+      }
+    };
+    DoubleMatrix sensi = fd.differentiate(function).apply(nodalCurve.getYValues());
+    List<ParameterMetadata> metadata = IntStream.range(0, nodalCurve.getParameterCount())
+        .mapToObj(i -> nodalCurve.getParameterMetadata(i))
+        .collect(toImmutableList());
+    return CrossGammaParameterSensitivity.of(nodalCurve.getName(), metadata, sensitivityCurrency, sensi);
+  }
+
 }

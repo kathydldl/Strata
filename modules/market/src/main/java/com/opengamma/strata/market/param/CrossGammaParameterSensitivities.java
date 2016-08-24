@@ -286,6 +286,15 @@ public final class CrossGammaParameterSensitivities
         .collect(toMultiCurrencyAmount());
   }
 
+  /**
+   * Returns the diagonal part of the sensitivity values.
+   * 
+   * @return the diagonal part
+   */
+  public CurrencyParameterSensitivities diagonal() {
+    return CurrencyParameterSensitivities.of(sensitivities.stream().map(s -> s.diagonal()).collect(Collectors.toList()));
+  }
+
   //-------------------------------------------------------------------------
   /**
    * Returns an instance with the sensitivity values multiplied by the specified factor.

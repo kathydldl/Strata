@@ -17,6 +17,7 @@ import org.testng.annotations.Test;
 import com.opengamma.strata.basics.currency.Currency;
 import com.opengamma.strata.basics.currency.CurrencyAmount;
 import com.opengamma.strata.basics.currency.FxRate;
+import com.opengamma.strata.collect.array.DoubleArray;
 import com.opengamma.strata.collect.array.DoubleMatrix;
 import com.opengamma.strata.data.MarketDataName;
 import com.opengamma.strata.market.curve.CurveName;
@@ -87,6 +88,13 @@ public class CrossGammaParameterSensitivityTest {
     assertEquals(test.getCurrency(), USD);
     double expected = MATRIX_USD1.get(0, 0) + MATRIX_USD1.get(0, 1) + MATRIX_USD1.get(1, 0) + MATRIX_USD1.get(1, 1);
     assertEquals(test.getAmount(), expected);
+  }
+
+  public void test_diagonal() {
+    CrossGammaParameterSensitivity base = CrossGammaParameterSensitivity.of(NAME1, METADATA_USD1, USD, MATRIX_USD1);
+    CurrencyParameterSensitivity test = base.diagonal();
+    DoubleArray value = DoubleArray.of(MATRIX_USD1.get(0, 0), MATRIX_USD1.get(1, 1));
+    assertEquals(test, CurrencyParameterSensitivity.of(NAME1, METADATA_USD1, USD, value));
   }
 
   //-------------------------------------------------------------------------

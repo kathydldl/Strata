@@ -196,6 +196,12 @@ public class CrossGammaParameterSensitivitiesTest {
     assertEquals(SENSI_2.total().getAmount(EUR).getAmount(), MATRIX_EUR1.total(), 1e-8);
   }
 
+  public void test_diagonal() {
+    assertEquals(SENSI_2.diagonal().size(), 2);
+    assertEquals(SENSI_2.diagonal().getSensitivity(NAME1, USD), ENTRY_USD2.diagonal());
+    assertEquals(SENSI_2.diagonal().getSensitivity(NAME2, EUR), ENTRY_EUR.diagonal());
+  }
+
   //-------------------------------------------------------------------------
   public void test_multipliedBy() {
     CrossGammaParameterSensitivities multiplied = SENSI_1.multipliedBy(FACTOR1);
